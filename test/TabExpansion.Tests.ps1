@@ -310,6 +310,41 @@ Describe 'TabExpansion Tests' {
         }
     }
 
+    Context 'Git wrapper function alias TabExpansion Tests' {
+        BeforeAll {
+            [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssigments', '')]
+            $aliasPath = Resolve-Path "$PSScriptRoot\..\aliases\git-aliases.ps1"
+            $repoPath = NewGitTempRepo -MakeInitialCommit
+            . $aliasPath
+        }
+        AfterAll {
+            RemoveGitTempRepo $repoPath
+        }
+        It 'Tab completes gco like git checkout' {
+            $result = & $module GitTabExpansionInternal 'gco ma'
+            $result | Should -BeExactly 'master'
+        }
+        It 'Command completion preserves the gco command token' {
+            $result = [System.Management.Automation.CommandCompletion]::CompleteInput('gco ma', 6, $null).CompletionMatches
+            $result.CompletionText | Should -BeExactly 'master'
+            $result.CompletionText | Should -Not -Contain 'git checkout master'
+        }
+        It 'Command completion registers aliases with short git parameters' {
+            $result = [System.Management.Automation.CommandCompletion]::CompleteInput('gcb ma', 6, $null).CompletionMatches
+            $result.CompletionText | Should -BeExactly 'master'
+        }
+        It 'Tab completes a non-checkout alias like its git subcommand' {
+            $result = & $module GitTabExpansionInternal 'gr s'
+            $result -contains 'set-url' | Should -Be $true
+            $result -contains 'show' | Should -Be $true
+        }
+        It 'Command completion returns non-checkout alias argument candidates' {
+            $result = [System.Management.Automation.CommandCompletion]::CompleteInput('gr s', 4, $null).CompletionMatches
+            $result.CompletionText -contains 'set-url' | Should -Be $true
+            $result.CompletionText -contains 'show' | Should -Be $true
+        }
+    }
+
     Context 'PowerShell Special Chars Tests' {
         BeforeAll {
             [System.Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssigments', '')]

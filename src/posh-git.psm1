@@ -172,6 +172,8 @@ $exportModuleMemberParams = @{
         'New-GitPromptSettings',
         'Remove-GitBranch',
         'Remove-PoshGitFromProfile',
+        'Register-PoshGitAliasFunctions',
+        'Register-PoshGitCommandAlias',
         'Update-AllBranches',
         'Write-GitStatus',
         'Write-GitBranchName',

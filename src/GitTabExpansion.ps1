@@ -7,6 +7,7 @@ $Global:GitTabSettings = New-Object PSObject -Property @{
         '!f() { exec vsts code pr "$@"; }; f' = 'vsts.pr'
     }
     EnableLogging = $false
+    GitCommandAliases = @{}
     LogPath = Join-Path ([System.IO.Path]::GetTempPath()) posh-git_tabexp.log
     RegisteredCommands = ""
 }
@@ -274,6 +275,27 @@ function script:expandGitAlias($cmd, $rest) {
     }
 }
 
+function script:expandGitRegisteredCommandAlias($command) {
+    if ($command -notmatch '^(?<command>\S+)(?<args>(?:\s.*)?)$') {
+        return $command
+    }
+
+    $gitCommand = $Global:GitTabSettings.GitCommandAliases[$matches['command']]
+    if ($gitCommand) {
+        return "$gitCommand$($matches['args'])"
+    }
+
+    return $command
+}
+
+function script:getGitCommandAliasPattern() {
+    if ($Global:GitTabSettings.GitCommandAliases.Count -eq 0) {
+        return $null
+    }
+
+    "($(([string[]]$Global:GitTabSettings.GitCommandAliases.Keys | ForEach-Object { [regex]::Escape($_) }) -join '|'))"
+}
+
 function script:expandLongParams($hash, $cmd, $filter) {
     $hash[$cmd].Trim() -split ' ' |
         Where-Object { $_ -like "$filter*" } |
@@ -303,12 +325,15 @@ function script:expandParamValues($cmd, $param, $filter) {
 
 function Expand-GitCommand($Command) {
     # Parse all Git output as UTF8, including tab completion output - https://github.com/dahlbyk/posh-git/pull/359
-    $res = Invoke-Utf8ConsoleCommand { GitTabExpansionInternal $Command $Global:GitStatus }
+    $gitStatus = Get-Variable -Name GitStatus -Scope Global -ValueOnly -ErrorAction SilentlyContinue
+    $res = Invoke-Utf8ConsoleCommand { GitTabExpansionInternal $Command $gitStatus }
     $res
 }
 
 function GitTabExpansionInternal($lastBlock, $GitStatus = $null) {
     $ignoreGitParams = '(?<params>\s+-(?:[aA-zZ0-9]+|-[aA-zZ0-9][aA-zZ0-9-]*)(?:=\S+)?)*'
+
+    $lastBlock = expandGitRegisteredCommandAlias $lastBlock
 
     if ($lastBlock -match "^$(Get-AliasPattern git) (?<cmd>\S+)(?<args> .*)$") {
         $lastBlock = expandGitAlias $Matches['cmd'] $Matches['args']
@@ -502,6 +527,95 @@ function GitTabExpansionInternal($lastBlock, $GitStatus = $null) {
     }
 }
 
+function Register-PoshGitCommandAlias {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$GitCommand
+    )
+
+    $Global:GitTabSettings.GitCommandAliases[$Name] = $GitCommand
+
+    if (!$UseLegacyTabExpansion -and ($PSVersionTable.PSVersion.Major -ge 6)) {
+        Microsoft.PowerShell.Core\Register-ArgumentCompleter -CommandName $Name -Native -ScriptBlock {
+            param($wordToComplete, $commandAst, $cursorPosition)
+
+            $padLength = $cursorPosition - $commandAst.Extent.StartOffset
+            $textToComplete = $commandAst.ToString().PadRight($padLength, ' ').Substring(0, $padLength)
+            if ($textToComplete -match '^(?<command>\S+)(?<args>(?:\s.*)?)$') {
+                $gitCommand = $Global:GitTabSettings.GitCommandAliases[$matches['command']]
+                if ($gitCommand) {
+                    $textToComplete = "$gitCommand$($matches['args'])"
+                }
+            }
+
+            Expand-GitCommand $textToComplete
+        }
+    }
+}
+
+function Register-PoshGitAliasFunctions {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors) {
+        throw "Failed to parse '$Path' for git alias completions."
+    }
+
+    $functions = $ast.FindAll({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+    }, $true)
+
+    foreach ($function in $functions) {
+        $commands = $function.Body.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst] -and
+                $node.CommandElements.Count -gt 1 -and
+                $node.CommandElements[0].Value -eq 'git'
+        }, $true)
+
+        foreach ($command in $commands) {
+            $argsIndex = -1
+            for ($i = 1; $i -lt $command.CommandElements.Count; $i++) {
+                $element = $command.CommandElements[$i]
+                if ($element -is [System.Management.Automation.Language.VariableExpressionAst] -and $element.VariablePath.UserPath -eq 'args') {
+                    $argsIndex = $i
+                    break
+                }
+            }
+
+            if ($argsIndex -ne ($command.CommandElements.Count - 1)) {
+                continue
+            }
+
+            $gitCommand = @('git')
+            $canRegister = $true
+            for ($i = 1; $i -lt $argsIndex; $i++) {
+                $element = $command.CommandElements[$i]
+                if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                    $gitCommand += $element.Value
+                }
+                elseif ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+                    $gitCommand += $element.Extent.Text
+                }
+                else {
+                    $canRegister = $false
+                    break
+                }
+            }
+
+            if ($canRegister) {
+                Register-PoshGitCommandAlias $function.Name ($gitCommand -join ' ')
+                break
+            }
+        }
+    }
+}
+
 function Expand-GitProxyFunction($command) {
     # Make sure the incoming command matches: <Command> <Args>, so we can extract the alias/command
     # name and the arguments being passed in.
@@ -602,6 +716,7 @@ else {
             "^$(Get-AliasPattern git) (.*)"  { WriteTabExpLog $msg; Expand-GitCommand $lastBlock }
             "^$(Get-AliasPattern tgit) (.*)" { WriteTabExpLog $msg; Expand-GitCommand $lastBlock }
             "^$(Get-AliasPattern gitk) (.*)" { WriteTabExpLog $msg; Expand-GitCommand $lastBlock }
+            "^$(getGitCommandAliasPattern) (.*)" { WriteTabExpLog $msg; Expand-GitCommand $lastBlock }
         }
     }
 }
