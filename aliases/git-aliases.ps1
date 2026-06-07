@@ -1078,6 +1078,10 @@ function gswm {
 }
 
 # ---- tag ------------------------------------------------------
+function gt {
+    git tag $args
+}
+
 function gta {
     git tag --annotate $args
 }
